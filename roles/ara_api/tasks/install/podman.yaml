@@ -17,22 +17,60 @@
     ara_api_log_dir: "/opt/ara/logs"
     ara_api_settings: "{{ ara_api_root_dir }}/settings.yaml"
 
-- name: Ensure ARA API container
+- name: Set up volume mount path
+  ansible.builtin.set_fact:
+    # could also be ternaries ¯\_(ツ)_/¯
+    _volume_mount: >-
+      {% if ansible_facts['selinux']['status'] == 'enabled' %}
+      {{ ara_api_root_dir}}:/opt/ara:z
+      {% else %}
+      {{ ara_api_root_dir}}:/opt/ara
+      {% endif %}
+
+    _systemd_dir: >-
+      {% if ansible_user_id == 'root' %}
+      /etc/systemd/service
+      {% else %}
+      {{ ansible_user_dir }}/.config/systemd/user
+      {% endif %}
+
+- name: Pull and run an ara-api container
   containers.podman.podman_container:
     name: ara-api
     image: "{{ ara_api_image }}:{{ ara_api_version }}"
     pull: newer
     state: present
     auto_remove: true
-    generate_systemd: "{{ ara_api_systemd_config }}"
     ports:
       - 127.0.0.1:8000:8000
     volume:
-      - "{{ ara_api_root_dir }}:/opt/ara{{ (ansible_facts['selinux']['status'] == 'enabled') | ternary(':z', '') }}"
+      # TODO: troubleshoot option :z breaking when selinux is enabled
+      - "{{ _volume_mount }}"
 
-- name: Ensure service
+- name: Create a systemd directory if we're unprivileged
+  ansible.builtin.file:
+    path: "{{ ansible_user_dir }}/.config/systemd/user"
+    mode: "0755"
+    recurse: true
+    state: present
+  # maybe we could check the uid of effective_uid instead
+  when: "ansible_user_id != 'root'"
+
+- name: Set up systemd unit file for the podman container
+  containers.podman.podman_generate_systemd:
+    name: ara-api
+    container_prefix: ""
+    separator: ""
+    # ^ maybe these above should be configurable
+    dest: "{{ _systemd_dir }}"
+    restart_policy: always
+    use_names: true
+    new: true
+
+- name: Enable and start the systemd service
   ansible.builtin.systemd:
-    name: ara-api.service
+    name: ara-api
+    scope: "{{ ansible_user_id == 'root' | ternary(omit, 'user') }}"
+    daemon_reload: true
     state: started
     enabled: true
-    daemon_reload: true
